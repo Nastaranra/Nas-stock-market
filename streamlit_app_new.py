@@ -1,25 +1,3 @@
-
-
-Conversations
-88% of 100 GB used
-Terms · Privacy · Program Policies
-Last account activity: 1 hour ago
-Details
-# ============================================================
-#  AI Trading Signal App  —  v3
-#  Improvements over v2:
-#  ✅ Parallel scanner  (ThreadPoolExecutor) → 5-10x faster
-#  ✅ Buy / Sell markers plotted on the price chart
-#  ✅ Stochastic RSI  (stronger overbought/oversold)
-#  ✅ OBV  (On-Balance Volume) — money flow confirmation
-#  ✅ EMA crossover signals  (9/21 EMA cross)
-#  ✅ Multi-factor signal engine  (weighted scoring)
-#  ✅ Risk/Reward ratio shown in trade plan
-#  ✅ 1-year data instead of 2-year (faster loads)
-#  ✅ Live price folded into main load (1 call per ticker)
-#  ✅ Earnings call moved to optional (saves 1 call/ticker)
-# ============================================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
