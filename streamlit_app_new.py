@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+import xml.etree.ElementTree as ET
 import plotly.graph_objects as go
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,14 +26,15 @@ DEFAULT_TICKERS = [
 POSITIVE_WORDS = [
     "beat","beats","surge","surges","jump","jumps","rally","rallies",
     "upgrade","upgraded","bullish","growth","record","strong","raises",
-    "outperform","buy","positive","profit","partnership","expands","higher"
+    "outperform","buy","positive","profit","partnership","expands","higher",
+    "ai demand","revenue growth","record high","new high"
 ]
 
 NEGATIVE_WORDS = [
     "miss","misses","fall","falls","drop","drops","plunge","plunges",
     "downgrade","downgraded","bearish","weak","cuts","lawsuit",
     "investigation","warning","loss","negative","sell","concern",
-    "slows","slowing","tariff","risk","lower"
+    "slows","slowing","tariff","risk","lower","probe","underperform"
 ]
 
 def safe_num(x, default=0.0):
@@ -135,47 +137,102 @@ def load_price_data(ticker, period="6mo", interval="1d"):
         return pd.DataFrame(), msg
 
 @st.cache_data(ttl=3600)
-def get_news_sentiment(ticker, max_items=8):
+def get_news_sentiment(ticker, max_items=10):
+    """
+    FIXED Recent News Sentiment:
+    - Uses yfinance news first
+    - Skips blank title rows
+    - If yfinance news is empty/blank, uses Yahoo Finance RSS fallback
+    - Prevents empty Neutral rows in the table
+    """
     rows = []
+
+    def score_title(title):
+        text = str(title).lower()
+        pos = sum(1 for w in POSITIVE_WORDS if w in text)
+        neg = sum(1 for w in NEGATIVE_WORDS if w in text)
+
+        if pos > neg:
+            return "Positive", 1
+        elif neg > pos:
+            return "Negative", -1
+        else:
+            return "Neutral", 0
+
+    # 1) Try yfinance news first
     try:
         news = yf.Ticker(ticker).news or []
+
         for item in news[:max_items]:
             title = item.get("title", "")
             publisher = item.get("publisher", "")
             link = item.get("link", "")
             ts = item.get("providerPublishTime", None)
+
+            if not str(title).strip():
+                continue
+
             dt = pd.to_datetime(ts, unit="s", errors="coerce") if ts else pd.NaT
-
-            text = title.lower()
-            pos = sum(1 for w in POSITIVE_WORDS if w in text)
-            neg = sum(1 for w in NEGATIVE_WORDS if w in text)
-
-            if pos > neg:
-                label = "Positive"
-                score = 1
-            elif neg > pos:
-                label = "Negative"
-                score = -1
-            else:
-                label = "Neutral"
-                score = 0
+            label, score = score_title(title)
 
             rows.append({
                 "Date": dt.strftime("%Y-%m-%d") if not pd.isna(dt) else "",
                 "Title": title,
-                "Publisher": publisher,
+                "Publisher": publisher if publisher else "Yahoo Finance",
                 "Sentiment": label,
                 "Score": score,
                 "Link": link
             })
+
     except Exception:
         pass
 
+    # 2) Yahoo Finance RSS fallback
     if not rows:
-        return pd.DataFrame(), 0, "No news found"
+        try:
+            rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+            r = requests.get(rss_url, timeout=10)
+
+            if r.status_code == 200 and r.content:
+                root = ET.fromstring(r.content)
+
+                for item in root.findall(".//item")[:max_items]:
+                    title = item.findtext("title", default="")
+                    link = item.findtext("link", default="")
+                    pub_date = item.findtext("pubDate", default="")
+
+                    if not str(title).strip():
+                        continue
+
+                    label, score = score_title(title)
+
+                    rows.append({
+                        "Date": pub_date,
+                        "Title": title,
+                        "Publisher": "Yahoo Finance RSS",
+                        "Sentiment": label,
+                        "Score": score,
+                        "Link": link
+                    })
+
+        except Exception:
+            pass
+
+    if not rows:
+        return pd.DataFrame(columns=["Date", "Title", "Publisher", "Sentiment", "Score", "Link"]), 0, "No news found"
 
     df = pd.DataFrame(rows)
-    avg = df["Score"].mean()
+
+    for col in ["Date", "Title", "Publisher", "Sentiment", "Score", "Link"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    df = df[df["Title"].astype(str).str.strip() != ""].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=["Date", "Title", "Publisher", "Sentiment", "Score", "Link"]), 0, "No news found"
+
+    avg = pd.to_numeric(df["Score"], errors="coerce").fillna(0).mean()
 
     if avg > 0.20:
         overall = "Positive"
@@ -293,6 +350,7 @@ def summarize_index(ticker):
     df = add_indicators(df)
     if df.empty:
         return {"Ticker": ticker, "Label": "Unavailable", "Score": 0, "Reason": "Not enough data after indicators"}
+
     latest = df.iloc[-1]
     close = safe_num(latest["Close"])
     ma20 = safe_num(latest["MA20"])
@@ -414,6 +472,7 @@ def timeframe_label(df):
     df = add_indicators(df)
     if df.empty:
         return "Unavailable", 0, "Not enough data after indicators"
+
     latest = df.iloc[-1]
 
     close = safe_num(latest["Close"])
@@ -1055,14 +1114,14 @@ def analyze_stock(ticker, horizon_days, term_type, fetch_earnings=False, fetch_n
 
     mtf_df, mtf_final = multi_timeframe_confirmation(df)
 
-    news_df = pd.DataFrame()
+    news_df = pd.DataFrame(columns=["Date", "Title", "Publisher", "Sentiment", "Score", "Link"])
     news_avg = 0
     news_overall = "Neutral"
     if fetch_news:
         try:
             news_df, news_avg, news_overall = get_news_sentiment(ticker)
         except Exception:
-            news_df = pd.DataFrame()
+            news_df = pd.DataFrame(columns=["Date", "Title", "Publisher", "Sentiment", "Score", "Link"])
             news_avg = 0
             news_overall = "News unavailable"
 
@@ -1319,13 +1378,22 @@ with tab1:
 
         st.markdown("### 📰 Recent News Sentiment")
         if result["news_df"].empty:
-            st.info("No recent Yahoo news found.")
+            st.info("No recent Yahoo news found for this ticker.")
         else:
-            st.dataframe(
-                result["news_df"][["Date", "Title", "Publisher", "Sentiment", "Score", "Link"]],
-                use_container_width=True,
-                height=300
-            )
+            news_cols = ["Date", "Title", "Publisher", "Sentiment", "Score", "Link"]
+            news_show = result["news_df"].copy()
+
+            for col in news_cols:
+                if col not in news_show.columns:
+                    news_show[col] = ""
+
+            news_show = news_show[news_cols]
+            news_show = news_show[news_show["Title"].astype(str).str.strip() != ""]
+
+            if news_show.empty:
+                st.info("No recent Yahoo news found for this ticker.")
+            else:
+                st.dataframe(news_show, use_container_width=True, height=300)
 
         st.markdown("### 💬 Signal Reasoning")
         for r in result["reasons"]:
